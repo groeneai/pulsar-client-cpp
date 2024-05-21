@@ -102,12 +102,12 @@ AuthenticationPtr AuthFactory::create(const std::string& pluginNameOrDynamicLibP
     return AuthFactory::create(pluginNameOrDynamicLibPath, params);
 }
 
-std::mutex mutex;
+std::mutex pulsar_client_cpp_auth_mutex;
 std::vector<void*> AuthFactory::loadedLibrariesHandles_;
 bool AuthFactory::isShutdownHookRegistered_ = false;
 
 void AuthFactory::release_handles() {
-    std::lock_guard<std::mutex> lock(mutex);
+    std::lock_guard<std::mutex> lock(pulsar_client_cpp_auth_mutex);
     for (std::vector<void*>::iterator ite = AuthFactory::loadedLibrariesHandles_.begin();
          ite != AuthFactory::loadedLibrariesHandles_.end(); ite++) {
         dlclose(*ite);
@@ -158,7 +158,7 @@ AuthenticationPtr tryCreateBuiltinAuth(const std::string& pluginName, const std:
 AuthenticationPtr AuthFactory::create(const std::string& pluginNameOrDynamicLibPath,
                                       const std::string& authParamsString) {
     {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::lock_guard<std::mutex> lock(pulsar_client_cpp_auth_mutex);
         if (!AuthFactory::isShutdownHookRegistered_) {
             atexit(release_handles);
             AuthFactory::isShutdownHookRegistered_ = true;
@@ -174,7 +174,7 @@ AuthenticationPtr AuthFactory::create(const std::string& pluginNameOrDynamicLibP
     void* handle = dlopen(pluginNameOrDynamicLibPath.c_str(), RTLD_LAZY);
     if (handle != NULL) {
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::lock_guard<std::mutex> lock(pulsar_client_cpp_auth_mutex);
             loadedLibrariesHandles_.push_back(handle);
         }
         Authentication* (*createAuthentication)(const std::string&);
@@ -194,7 +194,7 @@ AuthenticationPtr AuthFactory::create(const std::string& pluginNameOrDynamicLibP
 
 AuthenticationPtr AuthFactory::create(const std::string& pluginNameOrDynamicLibPath, ParamMap& params) {
     {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::lock_guard<std::mutex> lock(pulsar_client_cpp_auth_mutex);
         if (!AuthFactory::isShutdownHookRegistered_) {
             atexit(release_handles);
             AuthFactory::isShutdownHookRegistered_ = true;
@@ -209,7 +209,7 @@ AuthenticationPtr AuthFactory::create(const std::string& pluginNameOrDynamicLibP
     Authentication* auth = NULL;
     void* handle = dlopen(pluginNameOrDynamicLibPath.c_str(), RTLD_LAZY);
     if (handle != NULL) {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::lock_guard<std::mutex> lock(pulsar_client_cpp_auth_mutex);
         loadedLibrariesHandles_.push_back(handle);
         Authentication* (*createAuthentication)(ParamMap&);
         *(void**)(&createAuthentication) = dlsym(handle, "createFromMap");
