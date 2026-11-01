@@ -515,6 +515,28 @@ optional<SharedBuffer> ConsumerImpl::processMessageChunk(const SharedBuffer& pay
     //      chunks to avoid ack holes, then remove the old context and create a new one.
     // After handling the old context, check maxPendingChunkedMessage limit and create a new context.
     auto it = chunkedMessageCache_.find(uuid);
+
+    // The sizes come from the metadata written by the producer, and the bounds checks of `SharedBuffer`
+    // are only assertions, so a malformed chunk would overflow the buffer of the assembled message.
+    // Every chunk is at most one message, so the total size is bounded by the number of chunks.
+    auto discardMalformedChunk = [&](const char* reason) -> optional<SharedBuffer> {
+        LOG_ERROR(getName() << "Discarding a malformed chunk (" << reason << ", uuid: " << uuid
+                            << ", chunkId: " << chunkId << ", numChunks: " << metadata.num_chunks_from_msg()
+                            << ", totalChunkMsgSize: " << metadata.total_chunk_msg_size() << ", chunkSize: "
+                            << payload.readableBytes() << ", messageId: " << messageId << ")");
+        if (it != chunkedMessageCache_.end()) {
+            for (const MessageId& msgId : it->second.getChunkedMessageIds()) {
+                discardChunkMessages(uuid, msgId, true);
+            }
+            chunkedMessageCache_.remove(uuid);
+        }
+        lock.unlock();
+        // The permit of a chunk other than the last one was already returned at the entry.
+        discardCorruptedMessage(cnx, messageIdData, CommandAck_ValidationError_UncompressedSizeCorruption,
+                                chunkId == metadata.num_chunks_from_msg() - 1);
+        return {};
+    };
+
     if (chunkId == 0) {
         // Handle ack hole when receiving duplicated first chunk.
         // For example (message redeliver):
@@ -556,6 +578,14 @@ optional<SharedBuffer> ConsumerImpl::processMessageChunk(const SharedBuffer& pay
                      << "). Remove previous chunk context and restart assembling");
             chunkedMessageCache_.remove(uuid);
             it = chunkedMessageCache_.end();
+        }
+        const int64_t numChunks = metadata.num_chunks_from_msg();
+        const int64_t totalChunkMsgSize = metadata.total_chunk_msg_size();
+        const int64_t maxMessageSize = ClientConnection::getMaxMessageSize();
+        if (totalChunkMsgSize <= 0 || totalChunkMsgSize > numChunks * maxMessageSize ||
+            totalChunkMsgSize > static_cast<int64_t>(MaxUncompressedMessageSize) ||
+            static_cast<int64_t>(payload.readableBytes()) > totalChunkMsgSize) {
+            return discardMalformedChunk("invalid total size of the chunked message");
         }
         if (maxPendingChunkedMessage_ > 0 && chunkedMessageCache_.size() >= maxPendingChunkedMessage_) {
             chunkedMessageCache_.removeOldestValues(
@@ -685,10 +715,16 @@ optional<SharedBuffer> ConsumerImpl::processMessageChunk(const SharedBuffer& pay
     // Part 4: chunkId matches the expected next chunk ID, append chunk payload.
     // If all chunks have been received, assemble the full message, build a ChunkMessageId
     // containing all individual chunk message IDs, and return the uncompressed payload.
+    if (payload.readableBytes() > chunkedMsgCtx.getBuffer().writableBytes()) {
+        return discardMalformedChunk("the chunks are bigger than the total size of the chunked message");
+    }
     chunkedMsgCtx.appendChunk(messageId, payload);
     if (!chunkedMsgCtx.isCompleted()) {
         lock.unlock();
         return {};
+    }
+    if (chunkedMsgCtx.getBuffer().writableBytes() != 0) {
+        return discardMalformedChunk("the chunks are smaller than the total size of the chunked message");
     }
     messageId = std::make_shared<ChunkMessageIdImpl>(chunkedMsgCtx.moveChunkedMessageIds())->build();
     LOG_DEBUG("Chunked message completed chunkId: " << chunkId << ", ChunkedMessageCtx: " << chunkedMsgCtx
@@ -1082,7 +1118,30 @@ bool ConsumerImpl::uncompressMessageIfNeeded(const ClientConnectionPtr& cnx,
         return false;
     }
 
-    if (!CompressionCodecProvider::getCodec(compressionType).decode(payload, uncompressedSize, payload)) {
+    // The codecs allocate the declared uncompressed size before decompressing, and the size comes from the
+    // metadata written by the producer, so a tiny message could make the consumer allocate gigabytes.
+    if (uncompressedSize > MaxUncompressedMessageSize) {
+        LOG_ERROR(getName() << "Got a message with uncompressed size " << uncompressedSize
+                            << " bigger than the limit " << MaxUncompressedMessageSize << " at "
+                            << messageIdData.ledgerid() << ":" << messageIdData.entryid());
+        discardCorruptedMessage(cnx, messageIdData, CommandAck_ValidationError_UncompressedSizeCorruption);
+        return false;
+    }
+
+    bool decoded = false;
+    try {
+        decoded = CompressionCodecProvider::getCodec(compressionType).decode(payload, uncompressedSize, payload);
+    } catch (const std::exception& e) {
+        // An allocation failure must not escape the executor thread of the client. The message is not
+        // corrupted, so it is not acknowledged: it is tracked to be redelivered like an undecryptable one.
+        LOG_ERROR(getName() << "Failed to decompress message with " << uncompressedSize << " at "
+                            << messageIdData.ledgerid() << ":" << messageIdData.entryid() << ": " << e.what());
+        unAckedMessageTrackerPtr_->add(MessageIdBuilder::from(messageIdData).build());
+        increaseAvailablePermits(cnx);
+        return false;
+    }
+
+    if (!decoded) {
         LOG_ERROR(getName() << "Failed to decompress message with " << uncompressedSize  //
                             << " at  " << messageIdData.ledgerid() << ":" << messageIdData.entryid());
         discardCorruptedMessage(cnx, messageIdData, CommandAck_ValidationError_DecompressionError);
@@ -1094,7 +1153,8 @@ bool ConsumerImpl::uncompressMessageIfNeeded(const ClientConnectionPtr& cnx,
 
 void ConsumerImpl::discardCorruptedMessage(const ClientConnectionPtr& cnx,
                                            const proto::MessageIdData& messageId,
-                                           CommandAck_ValidationError validationError) {
+                                           CommandAck_ValidationError validationError,
+                                           bool increasePermits) {
     LOG_ERROR(getName() << "Discarding corrupted message at " << messageId.ledgerid() << ":"
                         << messageId.entryid());
 
@@ -1102,7 +1162,9 @@ void ConsumerImpl::discardCorruptedMessage(const ClientConnectionPtr& cnx,
                                         CommandAck_AckType_Individual, validationError);
 
     cnx->sendCommand(cmd);
-    increaseAvailablePermits(cnx);
+    if (increasePermits) {
+        increaseAvailablePermits(cnx);
+    }
 }
 
 void ConsumerImpl::internalListener() {

@@ -187,6 +187,11 @@ class ConsumerImpl : public ConsumerImplBase {
     ConsumerStatsBasePtr consumerStatsBasePtr_;
 
    private:
+    // The maximum size of a message after decompression or the reassembly of its chunks. The sizes are
+    // declared by the producer in the message metadata, and the buffers are allocated before the data is
+    // decoded, so the limit protects the consumer from a tiny message that declares a huge size.
+    static constexpr uint32_t MaxUncompressedMessageSize = 256 * 1024 * 1024;
+
     std::atomic_bool waitingForZeroQueueSizeMessage;
     // Set when the broker sends CommandReachedEndOfTopic and cleared again on each new broker
     // session (termination does not cancel redelivery of unacked messages); a drained receive
@@ -197,7 +202,8 @@ class ConsumerImpl : public ConsumerImplBase {
                                    const proto::MessageMetadata& metadata, SharedBuffer& payload,
                                    bool checkMaxMessageSize);
     void discardCorruptedMessage(const ClientConnectionPtr& cnx, const proto::MessageIdData& messageId,
-                                 CommandAck_ValidationError validationError);
+                                 CommandAck_ValidationError validationError,
+                                 bool increasePermits = true);
     void increaseAvailablePermits(const ClientConnectionPtr& currentCnx, int delta = 1);
     void increaseAvailablePermits(const Message& msg);
     void drainIncomingMessageQueue(size_t count);
