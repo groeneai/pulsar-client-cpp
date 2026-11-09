@@ -21,6 +21,7 @@
 
 #include <pulsar/Reader.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -167,6 +168,12 @@ class ConsumerImpl : public ConsumerImplBase {
 
     void onClusterSwitching();
 
+    // Validates the layout of a chunked message declared by its first chunk before anything is allocated for
+    // it. The values come from the metadata written by the producer. Every chunk carries at least one byte
+    // and at most one message, so both the number of chunks and the total size are bounded by each other.
+    static bool isValidChunkedMessageLayout(int64_t numChunks, int64_t totalChunkMsgSize,
+                                            int64_t maxMessageSize) noexcept;
+
    protected:
     // overrided methods from HandlerBase
     Future<Error, bool> connectionOpened(const ClientConnectionPtr& cnx) override;
@@ -297,7 +304,9 @@ class ConsumerImpl : public ConsumerImplBase {
         ChunkedMessageCtx() : totalChunks_(0) {}
         ChunkedMessageCtx(int totalChunks, int totalChunkMessageSize)
             : totalChunks_(totalChunks), chunkedMsgBuffer_(SharedBuffer::allocate(totalChunkMessageSize)) {
-            chunkedMessageIds_.reserve(totalChunks);
+            // The number of chunks is declared by the producer: do not trust it for the reservation, the
+            // vector grows with the chunks that are actually received.
+            chunkedMessageIds_.reserve(std::min(totalChunks, MaxReservedChunkIds));
         }
 
         ChunkedMessageCtx(const ChunkedMessageCtx&) = delete;
@@ -336,6 +345,8 @@ class ConsumerImpl : public ConsumerImplBase {
         }
 
        private:
+        static constexpr int MaxReservedChunkIds = 64;
+
         const int totalChunks_;
         SharedBuffer chunkedMsgBuffer_;
         std::vector<MessageId> chunkedMessageIds_;

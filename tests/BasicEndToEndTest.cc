@@ -600,7 +600,7 @@ TEST(BasicEndToEndTest, testMessageTooBig) {
     Result result = client.createProducer(topicName, conf, producer);
     ASSERT_EQ(ResultOk, result);
 
-    int size = ClientConnection::getMaxMessageSize() + 1000 * 100;
+    int size = Commands::DefaultMaxMessageSize + 1000 * 100;
     char *content = new char[size];
     memset(content, 0, size);
     Message msg = MessageBuilder().setAllocatedContent(content, size).build();
@@ -608,7 +608,7 @@ TEST(BasicEndToEndTest, testMessageTooBig) {
     ASSERT_EQ(ResultMessageTooBig, result);
 
     // Anything up to MaxMessageSize - MetadataSize should be allowed
-    size = ClientConnection::getMaxMessageSize() - 32; /*the default message metadata size for string schema*/
+    size = Commands::DefaultMaxMessageSize - 32; /*the default message metadata size for string schema*/
     msg = MessageBuilder().setAllocatedContent(content, size).build();
     result = producer.send(msg);
     ASSERT_EQ(ResultOk, result);
@@ -1219,7 +1219,7 @@ TEST(BasicEndToEndTest, testProduceMessageSize) {
     result = producerFuture.get(producer2);
     ASSERT_EQ(ResultOk, result);
 
-    int size = ClientConnection::getMaxMessageSize() + 1000 * 100;
+    int size = Commands::DefaultMaxMessageSize + 1000 * 100;
     char *content = new char[size];
     memset(content, 0, size);
     Message msg = MessageBuilder().setAllocatedContent(content, size).build();
@@ -1271,7 +1271,7 @@ TEST(BasicEndToEndTest, testBigMessageSizeBatching) {
     result = client.createProducer(topicName, conf2, producer2);
     ASSERT_EQ(ResultOk, result);
 
-    int size = ClientConnection::getMaxMessageSize() + 1000 * 100;
+    int size = Commands::DefaultMaxMessageSize + 1000 * 100;
     char *content = new char[size];
     memset(content, 0, size);
     Message msg = MessageBuilder().setAllocatedContent(content, size).build();
