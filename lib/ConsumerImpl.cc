@@ -1159,12 +1159,13 @@ bool ConsumerImpl::uncompressMessageIfNeeded(const ClientConnectionPtr& cnx,
     try {
         decoded = CompressionCodecProvider::getCodec(compressionType).decode(payload, uncompressedSize, payload);
     } catch (const std::exception& e) {
-        // An allocation failure must not escape the executor thread of the client. The message is not
-        // corrupted, so it is not acknowledged: it is tracked to be redelivered like an undecryptable one.
+        // An allocation failure must not escape the IO thread of the connection. The message is valid, so
+        // it is not acknowledged. The unacknowledged message tracker is disabled by default, so tracking the
+        // message would not redeliver it: close the connection instead, so that the unacknowledged messages
+        // are redelivered after the consumer reconnects.
         LOG_ERROR(getName() << "Failed to decompress message with " << uncompressedSize << " at "
                             << messageIdData.ledgerid() << ":" << messageIdData.entryid() << ": " << e.what());
-        unAckedMessageTrackerPtr_->add(MessageIdBuilder::from(messageIdData).build());
-        increaseAvailablePermits(cnx);
+        cnx->close(Error{ResultDisconnected, "Failed to allocate memory to decompress a message"});
         return false;
     }
 
